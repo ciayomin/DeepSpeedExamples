@@ -6,9 +6,11 @@
 import argparse
 import os
 import math
+import socket
 import sys
 
 import torch
+import wandb
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
 
@@ -20,6 +22,7 @@ from transformers import (
 import deepspeed
 from deepspeed.ops.adam import DeepSpeedCPUAdam, FusedAdam
 
+
 sys.path.append(
     os.path.abspath(os.path.join(os.path.dirname(__file__), os.path.pardir)))
 from utils.model.model_utils import create_critic_model
@@ -28,6 +31,7 @@ from utils.utils import print_rank_0, to_device, save_hf_format, set_random_seed
 from utils.ds_utils import get_train_ds_config
 from utils.module.lora import convert_linear_layer_to_lora, convert_lora_to_linear_layer, only_optimize_lora_parameters, make_model_gradient_checkpointing_compatible
 
+from utils import datetime_utils
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -184,6 +188,19 @@ def parse_args():
 def main():
     args = parse_args()
 
+    project_name = 'rlhf'
+    experiment_name = 'rlhf-step2'
+    run_dir = os.path.join(args.data_output_path, 'log', project_name, experiment_name)
+    if not os.path.exists(run_dir):
+        os.makedirs(str(run_dir))
+    wandb.init(config=args,
+               project=project_name,
+               name=experiment_name + '_' + datetime_utils.now(),
+               dir=run_dir,
+               job_type="training",
+               notes=socket.gethostname()
+               )
+
     if args.local_rank == -1:
         device = torch.device("cuda")
     else:
@@ -212,6 +229,10 @@ def main():
 
     # load_hf_tokenizer will get the correct tokenizer and set padding tokens based on the model family
     tokenizer = load_hf_tokenizer(args.model_name_or_path, fast_tokenizer=True)
+    tokenizer.pad_token = tokenizer.eos_token
+
+    # make sure tokenizer is right pad in our logic
+    tokenizer.padding_side = 'right'
     rm_model = create_critic_model(args.model_name_or_path,
                                    tokenizer,
                                    ds_config,
@@ -330,6 +351,29 @@ def main():
             rm_model.backward(loss)
             rm_model.step()
             mean_loss += loss.item()
+
+            chosen = outputs["chosen_mean_scores"]
+            rejected = outputs["rejected_mean_scores"]
+
+            correct_predictions = (chosen > rejected).sum() * 1.0 / chosen.shape[0]
+            reward = outputs["chosen_mean_scores"].mean().float()
+            r_reward = outputs["rejected_mean_scores"].mean().float()
+            print_rank_0(f'step: {step} loss:{loss}, '
+                         f'correct_predictions: {correct_predictions}, '
+                         f'reward: {reward} '
+                         f'r_reward: {r_reward} ',
+                         args.global_rank)
+
+            if args.global_rank == 0:
+                wandb.log({
+                    'Train/epoch': epoch,
+                    'Train/step': step,
+                    'Train/loss': loss,
+                    'Train/reward': reward,
+                    'Train/r_reward': r_reward,
+                    'Train/lr_0': lr_scheduler.get_lr()[0],
+                    'Train/reward_diff': reward - r_reward
+                })
         print_rank_0(
             f"Epoch {epoch+1}/{args.num_train_epochs} with loss {mean_loss/(step+1)}",
             args.global_rank)

@@ -6,10 +6,13 @@
 import argparse
 import re
 import logging
+
+# import ray
+import torch
 import transformers  # noqa: F401
 import os
 import json
-from transformers import pipeline, set_seed
+from transformers import pipeline, set_seed, AutoModelForCausalLM
 from transformers import AutoConfig, OPTForCausalLM, AutoTokenizer
 
 
@@ -29,49 +32,51 @@ def parse_args():
 
 
 def get_generator(path):
-    if os.path.exists(path):
-        # Locally tokenizer loading has some issue, so we need to force download
-        model_json = os.path.join(path, "config.json")
-        if os.path.exists(model_json):
-            model_json_file = json.load(open(model_json))
-            model_name = model_json_file["_name_or_path"]
-            tokenizer = AutoTokenizer.from_pretrained(model_name,
-                                                      fast_tokenizer=True)
-    else:
-        tokenizer = AutoTokenizer.from_pretrained(path, fast_tokenizer=True)
+    # if os.path.exists(path):
+    #     # Locally tokenizer loading has some issue, so we need to force download
+    #     model_json = os.path.join(path, "config.json")
+    #     if os.path.exists(model_json):
+    #         model_json_file = json.load(open(model_json))
+    #         model_name = model_json_file["_name_or_path"]
+    #         tokenizer = AutoTokenizer.from_pretrained(model_name,
+    #                                                   fast_tokenizer=True)
+    # else:
+    #     tokenizer = AutoTokenizer.from_pretrained(path, fast_tokenizer=True)
+    tokenizer = AutoTokenizer.from_pretrained(path, use_fast=False)
 
-    tokenizer.pad_token = tokenizer.eos_token
+    # tokenizer.pad_token = tokenizer.eos_token
 
-    model_config = AutoConfig.from_pretrained(path)
-    model = OPTForCausalLM.from_pretrained(path,
-                                           from_tf=bool(".ckpt" in path),
-                                           config=model_config).half()
+    model = AutoModelForCausalLM.from_pretrained(path,
+                                                 low_cpu_mem_usage=True, torch_dtype=torch.float16,
+                                                 device_map="auto")
 
-    model.config.end_token_id = tokenizer.eos_token_id
-    model.config.pad_token_id = model.config.eos_token_id
-    model.resize_token_embeddings(len(tokenizer))
+    # model.config.end_token_id = tokenizer.eos_token_id
+    # model.config.pad_token_id = model.config.eos_token_id
+    # model.resize_token_embeddings(len(tokenizer))
     generator = pipeline("text-generation",
                          model=model,
                          tokenizer=tokenizer,
-                         device="cuda:0")
+                         device_map="auto")
     return generator
 
 
 def get_user_input(user_input):
     tmp = input("Enter input (type 'quit' to exit, 'clear' to clean memory): ")
-    new_inputs = f"Human: {tmp}\n Assistant: "
+    new_inputs = f"Human: {tmp}\n Assistant:"
     user_input += f" {new_inputs}"
     return user_input, tmp == "quit", tmp == "clear"
 
 
 def get_model_response(generator, user_input, max_new_tokens):
-    response = generator(user_input, max_new_tokens=max_new_tokens)
+    response = generator(user_input, max_new_tokens=max_new_tokens,
+                         do_sample=True,
+                         temperature=0.7)
     return response
 
 
 def process_response(response, num_rounds):
     output = str(response[0]["generated_text"])
-    output = output.replace("<|endoftext|></s>", "")
+    output = output.replace("<|endoftext|>", "")
     all_positions = [m.start() for m in re.finditer("Human: ", output)]
     place_of_second_q = -1
     if len(all_positions) > num_rounds:
@@ -81,9 +86,27 @@ def process_response(response, num_rounds):
     return output
 
 
+def get_model_response_2(model, tokenizer, prompt):
+    input_ids = tokenizer([prompt]).input_ids
+    output_ids = model.generate(
+        torch.as_tensor(input_ids).cuda(),
+        do_sample=True,
+        temperature=0.7,
+        max_new_tokens=1024,
+    )
+    output_ids = output_ids[0][len(input_ids[0]) :]
+    outputs = tokenizer.decode(output_ids, skip_special_tokens=True).strip()
+    return outputs
+
 def main(args):
-    generator = get_generator(args.path)
-    set_seed(42)
+    # generator = get_generator(args.path)
+    # set_seed(42)
+
+    tokenizer = AutoTokenizer.from_pretrained(args.path, use_fast=False)
+    model = AutoModelForCausalLM.from_pretrained(
+        args.path, low_cpu_mem_usage=True, torch_dtype=torch.float16,
+          device_map = "auto",
+    )
 
     user_input = ""
     num_rounds = 0
@@ -97,9 +120,11 @@ def main(args):
             user_input, num_rounds = "", 0
             continue
 
-        response = get_model_response(generator, user_input,
-                                      args.max_new_tokens)
-        output = process_response(response, num_rounds)
+        # response = get_model_response(generator, user_input,
+        #                               args.max_new_tokens)
+        # output = process_response(response, num_rounds)
+        output = get_model_response_2(
+            model, tokenizer, user_input)
 
         print("-" * 30 + f" Round {num_rounds} " + "-" * 30)
         print(f"{output}")

@@ -19,8 +19,12 @@ for prompt_batch in prompt_train_dataloader:
 import argparse
 import os
 import random
+import socket
+
 import time
 import torch
+# import wandb
+from torch import tensor
 from torch.utils.data import DataLoader, RandomSampler
 from torch.utils.data.distributed import DistributedSampler
 
@@ -38,15 +42,24 @@ from rlhf_engine import DeepSpeedRLHFEngine
 
 import sys
 
+
 sys.path.append(
     os.path.abspath(os.path.join(os.path.dirname(__file__), os.path.pardir)))
 from utils.data.data_utils import create_prompt_dataset, MiniDataset, DataCollatorRLHF, get_unsupervised_data
 from utils.utils import print_rank_0, to_device, save_hf_format, set_random_seed, get_all_reduce_mean, moving_average, save_zero_three_model, load_hf_tokenizer
 from utils.module.lora import convert_lora_to_linear_layer
+from utils import datetime_utils
+
+import deepspeed.comm as dist
 from utils.perf import print_throughput_step3
 
 writer = None
 
+from utils.module.llama_flash_attn_monkey_patch import (
+    replace_llama_attn_with_flash_attn,
+)
+
+# replace_llama_attn_with_flash_attn()
 
 def parse_args():
     global writer
@@ -416,6 +429,22 @@ def create_datasets(args, tokenizer, train_phase=3):
 def main():
     args = parse_args()
 
+    # torch.cuda.amp.autocast(dtype=torch.bfloat16)
+    # torch.backends.cuda.matmul.allow_tf32 = True
+
+    # project_name = 'rlhf'
+    # experiment_name = 'rlhf-step3'
+    # run_dir = os.path.join(args.data_output_path, 'log', project_name, experiment_name)
+    # if not os.path.exists(run_dir):
+    #     os.makedirs(str(run_dir))
+    # wandb.init(config=args,
+    #            project=project_name,
+    #            name=experiment_name + '_' + datetime_utils.now(),
+    #            dir=run_dir,
+    #            job_type="training",
+    #            notes=socket.gethostname(),
+    #            )
+
     if args.local_rank == -1:
         device = torch.device("cuda")
     else:
@@ -439,7 +468,13 @@ def main():
 
     # load_hf_tokenizer will get the correct tokenizer and set padding tokens based on the model family
     tokenizer = load_hf_tokenizer(args.actor_model_name_or_path,
-                                  fast_tokenizer=True)
+                                  fast_tokenizer=False)
+
+    # tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.pad_token = tokenizer.unk_token
+
+    # make sure tokenizer is right pad in our logic
+    tokenizer.padding_side = 'right'
     prompt_train_dataloader, unsupervised_train_dataloader, num_total_iters = create_datasets(
         args=args, tokenizer=tokenizer, train_phase=3)
 
@@ -451,6 +486,8 @@ def main():
         num_total_iters=num_total_iters,
         args=args)
 
+    # args.end_of_conversation_token = "<|endoftext|>"
+    args.end_of_conversation_token = ""
     # Mixed Precision ZeRO++
     if args.enable_mixed_precision_lora:
         assert args.actor_lora_dim > 0, "Mixed Precision LoRA requires LoRA to be enabled"
@@ -468,6 +505,8 @@ def main():
                                    args.per_device_training_batch_size)
     unsup_mini_dataset = MiniDataset(args.generation_batches,
                                      args.per_device_training_batch_size)
+
+    # dist.all_reduce(tensor)
 
     # Train!
     print_rank_0("***** Running training *****", args.global_rank)
@@ -551,6 +590,15 @@ def main():
                 print_rank_0(
                     "-------------------------------------------------------------------------------------",
                     args.global_rank)
+                # if args.global_rank == 0:
+                #     wandb.log({
+                #         'Train/step': step + 1,
+                #         'Train/act_loss': actor_loss_sum/inner_iter,
+                #         'Train/cri_loss': critic_loss_sum/inner_iter,
+                #         'Train/average_reward': average_reward/inner_iter,
+                #         'Train/actor_0': rlhf_engine.actor.lr_scheduler.get_lr()[0],
+                #         'Train/critic_0': rlhf_engine.critic.lr_scheduler.get_lr()[0],
+                #     })
 
                 if args.enable_tensorboard and torch.distributed.get_rank(
                 ) == 0:
@@ -573,6 +621,8 @@ def main():
 
             if args.actor_gradient_checkpointing:
                 rlhf_engine.actor.gradient_checkpointing_disable()
+
+        # dist.log_summary()
 
             actor_overflow, critic_overflow = trainer.get_overflow()
 

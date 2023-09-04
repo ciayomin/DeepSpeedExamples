@@ -6,9 +6,11 @@
 import argparse
 import os
 import math
+import socket
 import sys
 
 import torch
+import wandb
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
 
@@ -22,6 +24,7 @@ from transformers import (
 import deepspeed
 from deepspeed.ops.adam import DeepSpeedCPUAdam, FusedAdam
 
+
 sys.path.append(
     os.path.abspath(os.path.join(os.path.dirname(__file__), os.path.pardir)))
 from utils.data.data_utils import create_prompt_dataset
@@ -31,6 +34,12 @@ from utils.module.lora import convert_linear_layer_to_lora, convert_lora_to_line
 from utils.model.model_utils import create_hf_model
 from utils.perf import print_throughput
 
+from utils import datetime_utils
+from utils.module.llama_flash_attn_monkey_patch import (
+    replace_llama_attn_with_flash_attn,
+)
+
+# replace_llama_attn_with_flash_attn()
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -189,6 +198,19 @@ def parse_args():
 def main():
     args = parse_args()
 
+    project_name = 'rlhf'
+    experiment_name = 'rlhf-step1'
+    run_dir = os.path.join(args.data_output_path, 'log', project_name, experiment_name)
+    if not os.path.exists(run_dir):
+        os.makedirs(str(run_dir))
+    wandb.init(config=args,
+               project=project_name,
+               name=experiment_name + '_' + datetime_utils.now(),
+               dir=run_dir,
+               job_type="training",
+               notes=socket.gethostname(),
+               )
+
     if args.local_rank == -1:
         device = torch.device("cuda")
     else:
@@ -216,8 +238,10 @@ def main():
 
     torch.distributed.barrier()
 
-    # load_hf_tokenizer will get the correct tokenizer and set padding tokens based on the model family
-    tokenizer = load_hf_tokenizer(args.model_name_or_path, fast_tokenizer=True)
+    tokenizer = load_hf_tokenizer(args.model_name_or_path, fast_tokenizer=False)
+    tokenizer.pad_token = tokenizer.unk_token
+    # make sure tokenizer is right pad in our logic
+    tokenizer.padding_side = 'right'
     model = create_hf_model(AutoModelForCausalLM,
                             args.model_name_or_path,
                             tokenizer,
@@ -334,6 +358,13 @@ def main():
                 )
             model.backward(loss)
             model.step()
+            print_rank_0(f'[{datetime_utils.now()}] step: {step} loss:{loss}', args.global_rank)
+            if args.global_rank == 0:
+                wandb.log({
+                    'Train/step': step + 1,
+                    'Train/loss': loss,
+                    'Train/lr': lr_scheduler.get_lr()[0]
+                })
             end = time.time()
             if torch.distributed.get_rank() == 0:
                 print_throughput(model.model, args, end - start,

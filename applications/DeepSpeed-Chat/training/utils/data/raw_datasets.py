@@ -2,9 +2,19 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # DeepSpeed Team
+import json
+
+import numpy as np
 from datasets import load_dataset
 from torch.utils.data import Subset
 import re
+
+from utils.utils import print_rank_0
+
+
+def modify_dataset_name(dataset_name):
+    name = dataset_name.split("/")[-1]
+    return f"/disk1/datasets/{name}"
 
 
 # The template prompt dataset class that all new dataset porting needs to
@@ -15,8 +25,22 @@ class PromptRawDataset(object):
         self.output_path = output_path
         self.seed = seed
         self.local_rank = local_rank
-        if not dataset_name == 'local/jsonfile':
+        dataset_name = modify_dataset_name(dataset_name)
+        if 'ShareGPT_Vicuna_unfiltered' in dataset_name:
+            self.raw_datasets = load_json_dataset(dataset_name+"/ShareGPT_V3_unfiltered_cleaned_split_no_imsorry_no_unwanted_4096.json")
+        elif 'tw_election' in dataset_name:
+            self.raw_datasets = load_json_dataset_2("/disk1/work/xiaym/dev/tw.json")
+        elif 'Chinese_Llama_Alpaca' in dataset_name:
+            self.raw_datasets = load_json_dataset(
+                "/disk1/work/xiaym/dev/Chinese-LLaMA-Alpaca/data/alpaca_data_zh_51k.json")
+        elif 'llama2chinese' in dataset_name:
+            self.raw_datasets = load_dataset("csv", data_files={"train": "/disk1/work/xiaym/dev/Llama2-Chinese/data/train_sft.csv",
+                                              "test": "/disk1/work/xiaym/dev/Llama2-Chinese/data/dev_sft.csv"})
+        else:
             self.raw_datasets = load_dataset(dataset_name)
+        # if not dataset_name == 'local/jsonfile':
+        #     self.raw_datasets = load_dataset(dataset_name)
+
 
     def get_train_data(self):
         return
@@ -43,6 +67,166 @@ class PromptRawDataset(object):
     def get_prompt_and_rejected(self, sample):
         return
 
+def load_json_dataset_2(dataset_name):
+    raw_data = json.load(open(dataset_name, "r"))
+
+
+    train_raw_data = [item for item in raw_data]
+    eval_raw_data = [item for item in raw_data]
+    print_rank_0(f"#train {len(train_raw_data)}, #eval {len(eval_raw_data)}")
+
+    return dict(train=train_raw_data, test=eval_raw_data)
+
+def load_json_dataset(dataset_name):
+    raw_data = json.load(open(dataset_name, "r"))
+
+    # Split train/test
+    perm = np.random.permutation(len(raw_data))
+    split = int(len(perm) * 0.98)
+    train_indices = perm[:split]
+    eval_indices = perm[split:]
+    train_raw_data = [raw_data[i] for i in train_indices]
+    eval_raw_data = [raw_data[i] for i in eval_indices]
+    print_rank_0(f"#train {len(train_raw_data)}, #eval {len(eval_raw_data)}")
+
+    return dict(train=train_raw_data, test=eval_raw_data)
+
+class TwElectionDataset(PromptRawDataset):
+
+    def __init__(self, output_path, seed, local_rank, dataset_name):
+        super().__init__(output_path, seed, local_rank, dataset_name)
+        self.dataset_name = "TW_Election"
+        self.dataset_name_clean = "TW_Election"
+
+    def get_train_data(self):
+        return self.raw_datasets["train"]
+
+    def get_eval_data(self):
+        return self.raw_datasets["test"]
+
+    def get_prompt(self, sample):
+        return sample['instruct']
+
+    def get_chosen(self, sample):
+        return sample['answer']
+
+    def get_rejected(self, sample):
+        return None
+
+    def get_prompt_and_chosen(self, sample):
+
+        return "Human: " + sample['instruct'] + " Assistant: " + sample['answer']
+
+    def get_prompt_and_rejected(self, sample):
+        return None
+
+class ChineseLlamaAlpacaDataset(PromptRawDataset):
+
+    def __init__(self, output_path, seed, local_rank, dataset_name):
+        super().__init__(output_path, seed, local_rank, dataset_name)
+        self.dataset_name = "Chinese_Llama_Alpaca"
+        self.dataset_name_clean = "Chinese_Llama_Alpaca"
+
+    def get_train_data(self):
+        return self.raw_datasets["train"]
+
+    def get_eval_data(self):
+        return self.raw_datasets["test"]
+
+    def get_prompt(self, sample):
+        return sample['instruction']
+
+    def get_chosen(self, sample):
+        return sample['output']
+
+    def get_rejected(self, sample):
+        return None
+
+    def get_prompt_and_chosen(self, sample):
+
+        return "Human: " + sample['instruction'] + " Assistant: " + sample['output']
+
+    def get_prompt_and_rejected(self, sample):
+        return None
+
+
+
+class Llama2ChineseDataset(PromptRawDataset):
+
+    def __init__(self, output_path, seed, local_rank, dataset_name):
+        super().__init__(output_path, seed, local_rank, dataset_name)
+        self.dataset_name = "llama2chinese"
+        self.dataset_name_clean = "llama2chinese"
+
+    def get_train_data(self):
+        return self.raw_datasets["train"]
+
+    def get_eval_data(self):
+        return self.raw_datasets["test"]
+
+    def get_prompt(self, sample):
+        return sample['prompt']
+
+    def get_chosen(self, sample):
+        return sample['chosen']
+
+    def get_rejected(self, sample):
+        return None
+
+    def get_prompt_and_chosen(self, sample):
+        sample = sample['text']
+
+        return sample.replace("</s>", "").replace("<s>Human:", "Human:").replace("<s>Assistant:", " Assistant:")
+
+    def get_prompt_and_rejected(self, sample):
+        return None
+
+# English dataset
+class ShareGPTVicunaUnfilteredDataset(PromptRawDataset):
+
+    def __init__(self, output_path, seed, local_rank, dataset_name):
+        super().__init__(output_path, seed, local_rank, dataset_name)
+        self.dataset_name = "anon8231489123/ShareGPT_Vicuna_unfiltered"
+        self.dataset_name_clean = "anon8231489123_ShareGPT_Vicuna_unfiltered"
+
+    def get_train_data(self):
+        return self.raw_datasets["train"]
+
+    def get_eval_data(self):
+        return self.raw_datasets["test"]
+
+    def get_prompt(self, sample):
+        return sample['prompt']
+
+    def get_chosen(self, sample):
+        return sample['chosen']
+
+    def get_rejected(self, sample):
+        return None
+
+    def get_prompt_and_chosen(self, sample):
+        sample = sample['conversations']
+        if sample[0]["from"] != "human":
+            # Skip the first one if it is not from human
+            sample = sample[1:]
+
+        conversations = []
+        messages = []
+        for j, sentence in enumerate(sample):
+            role = sentence["from"]
+            if role == "human":
+                role = "Human: "
+            else:
+                role = "Assistant: "
+            messages.append(role + sentence["value"].replace("Assistant:", "assistant:"))
+            if j % 2 == 1:
+                conversations.append(" ".join(messages))
+                messages = []
+
+        return "</s> ".join(conversations)
+
+    def get_prompt_and_rejected(self, sample):
+        return None
 
 # English dataset
 class DahoasRmstaticDataset(PromptRawDataset):
@@ -333,7 +517,8 @@ class PvduySharegptalpacaoavicunaformatDataset(PromptRawDataset):
         if sample['prompt'] is not None and sample['label'] is not None and len(
                 sample['prompt']) > 0 and len(sample['label']) > 0:
             return sample['prompt'].replace("USER", "Human").replace(
-                "ASSISTANT", "Assistant") + " " + sample['label']
+                "ASSISTANT", "Assistant").replace("\nAssistant:", " Assistant:") \
+                   + " " + sample['label'].replace("</s>", "")
         return None
 
     def get_prompt_and_rejected(self, sample):
@@ -352,9 +537,9 @@ class LocalJsonFileDataset(PromptRawDataset):
         self.raw_datasets = load_dataset('json',
                                          data_files={
                                              "train":
-                                             chat_path + '/data/train.json',
+                                                 chat_path + '/data/train.json',
                                              "eval":
-                                             chat_path + '/data/eval.json'
+                                                 chat_path + '/data/eval.json'
                                          })
 
     def get_train_data(self):

@@ -15,10 +15,10 @@ import os
 import hashlib
 from itertools import chain
 from . import raw_datasets
+from ..utils import print_rank_0
 
 
 def get_raw_dataset(dataset_name, output_path, seed, local_rank):
-
     if "Dahoas/rm-static" in dataset_name:
         return raw_datasets.DahoasRmstaticDataset(output_path, seed,
                                                   local_rank, dataset_name)
@@ -37,6 +37,19 @@ def get_raw_dataset(dataset_name, output_path, seed, local_rank):
     elif "stanfordnlp/SHP" in dataset_name:
         return raw_datasets.StanfordnlpSHPDataset(output_path, seed,
                                                   local_rank, dataset_name)
+    elif "pvduy/sharegpt_alpaca_oa_vicuna_format" in dataset_name:
+        return raw_datasets.PvduySharegptalpacaoavicunaformatDataset(
+            output_path, seed, local_rank, dataset_name)
+    elif "anon8231489123/ShareGPT_Vicuna_unfiltered" in dataset_name:
+        return raw_datasets.ShareGPTVicunaUnfilteredDataset(
+            output_path, seed, local_rank, dataset_name)
+    elif "llama2chinese" in dataset_name:
+        return raw_datasets.Llama2ChineseDataset(
+            output_path, seed, local_rank, dataset_name)
+    elif 'Chinese_Llama_Alpaca' in dataset_name:
+        return raw_datasets.ChineseLlamaAlpacaDataset(output_path, seed, local_rank, dataset_name)
+    elif 'tw_election' in dataset_name:
+        return raw_datasets.TwElectionDataset(output_path, seed, local_rank, dataset_name)
     elif "pvduy/sharegpt_alpaca_oa_vicuna_format" in dataset_name:
         return raw_datasets.PvduySharegptalpacaoavicunaformatDataset(
             output_path, seed, local_rank, dataset_name)
@@ -113,7 +126,7 @@ def get_raw_dataset_split_index(local_rank, output_path, dataset_name, seed,
         for split_i in range(len(splits)):
             shuffle_idx_split_file_name = f"{output_path}/{dataset_name}_seed{seed}_{split_name}_{data_split}_{split_i}.npy"
             shuffle_idx_split = shuffle_idx[
-                splits_index[split_i]:splits_index[split_i + 1]]
+                                splits_index[split_i]:splits_index[split_i + 1]]
             np.save(shuffle_idx_split_file_name,
                     shuffle_idx_split,
                     allow_pickle=True)
@@ -143,14 +156,14 @@ class PromptDataset(Dataset):
             return {
                 "input_ids": self.chosen_dataset[idx]["input_ids"],
                 "attention_mask": self.chosen_dataset[idx]["attention_mask"],
-                "labels": self.chosen_dataset[idx]["input_ids"]
+                "labels": self.chosen_dataset[idx]["labels"]
             }
         elif self.train_phase == 2:
             return self.chosen_dataset[idx]["input_ids"], self.chosen_dataset[idx]["attention_mask"], \
-                self.reject_dataset[idx]["input_ids"], self.reject_dataset[idx]["attention_mask"]
+                   self.reject_dataset[idx]["input_ids"], self.reject_dataset[idx]["attention_mask"]
         elif self.train_phase == 3:
-            return self.prompt_dataset[idx]["input_ids"],self.prompt_dataset[idx]["attention_mask"], \
-                self.pad_token_id
+            return self.prompt_dataset[idx]["input_ids"], self.prompt_dataset[idx]["attention_mask"], \
+                   self.pad_token_id
 
 
 def create_dataset_split(current_dataset, raw_dataset, train_phase, tokenizer,
@@ -174,7 +187,15 @@ def create_dataset_split(current_dataset, raw_dataset, train_phase, tokenizer,
                     0)
                 chosen_token["attention_mask"] = chosen_token[
                     "attention_mask"].squeeze(0)
-                chosen_dataset.append(chosen_token)
+
+                # only train response set prompt id to -100
+                target = chosen_token["input_ids"].clone()
+                flag = mask_labels(chosen_sentence, target, tokenizer)
+                chosen_token["labels"] = target
+                if flag:
+                    chosen_dataset.append(chosen_token)
+
+        print_rank_0(f"train size before filter: {len(current_dataset)} after filter: {len(chosen_dataset)}")
 
     elif train_phase == 2:
         for i, tmp_data in enumerate(current_dataset):
@@ -226,6 +247,43 @@ def create_dataset_split(current_dataset, raw_dataset, train_phase, tokenizer,
                          tokenizer.pad_token_id, train_phase)
 
 
+def mask_labels(conversation, target, tokenizer):
+    sep = " Assistant: "
+
+    total_len = int(target.ne(tokenizer.pad_token_id).sum())
+
+    rounds = conversation.split('</s>')
+    cur_len = 1
+    target[:cur_len] = -100
+    for i, rou in enumerate(rounds):
+        if rou == "":
+            break
+
+        parts = rou.split(sep)
+        if len(parts) != 2:
+            break
+        parts[0] += sep
+        round_len = len(tokenizer(rou).input_ids)
+        instruction_len = len(tokenizer(parts[0]).input_ids) - 2
+
+        target[cur_len: cur_len + instruction_len] = -100
+
+        cur_len += round_len
+    target[cur_len:] = -100
+
+    if cur_len != total_len:
+        target[:] = -100
+        print_rank_0(
+            f"WARNING: tokenization mismatch: {cur_len} vs. {total_len}."
+            f" (ignored)"
+        )
+        return False
+    else:
+        return True
+
+
+
+
 def create_dataset(local_rank, dataset_name, data_split, output_path,
                    train_phase, seed, tokenizer, end_of_conversation_token,
                    max_seq_len):
@@ -263,7 +321,7 @@ def create_prompt_dataset(local_rank,
                           seed,
                           tokenizer,
                           max_seq_len,
-                          end_of_conversation_token="<|endoftext|>",
+                          end_of_conversation_token="</s>",
                           sft_only_data_path=[],
                           reload=False):
     """
@@ -281,6 +339,7 @@ def create_prompt_dataset(local_rank,
     eval_fname = f"{output_path}/evaldata_{fname}.pt"
 
     cache_found = os.path.isfile(train_fname) and os.path.isfile(eval_fname)
+    # cache_found = False
     buf_create_cache = torch.ByteTensor([not cache_found]).cuda()
     torch.distributed.all_reduce(buf_create_cache)
 

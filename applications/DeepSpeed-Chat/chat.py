@@ -14,7 +14,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--max_new_tokens",
         type=int,
-        default=128,
+        default=256,
         help="Maximum new tokens to generate per response",
     )
     args = parser.parse_args()

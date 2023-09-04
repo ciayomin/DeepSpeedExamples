@@ -66,7 +66,7 @@ def parse_args():
     parser.add_argument(
         "--max_new_tokens",
         type=int,
-        default=100,
+        default=1000,
         help='Specify num of return sequences',
     )
     parser.add_argument("--language",
@@ -131,7 +131,8 @@ def print_utils(gen_output):
 def prompt_eval(args, model_baseline, model_fintuned, tokenizer, device,
                 prompts):
     for prompt in prompts:
-        inputs = tokenizer(prompt, return_tensors="pt").to(device)
+        # inputs = tokenizer(prompt, return_tensors="pt").to(device)
+        inputs = tokenizer(prompt, return_tensors="pt")
         print("==========Baseline: Greedy=========")
         r_base = generate(model_baseline,
                           tokenizer,
@@ -194,20 +195,20 @@ def prompt_eval(args, model_baseline, model_fintuned, tokenizer, device,
 def main():
     args = parse_args()
 
-    device = torch.device("cuda:0")
+    device = torch.device("cuda")
 
     tokenizer = load_hf_tokenizer(args.model_name_or_path_baseline,
                                   fast_tokenizer=True)
 
     model_baseline = create_hf_model(AutoModelForCausalLM,
                                      args.model_name_or_path_baseline,
-                                     tokenizer, None)
+                                     tokenizer, None).half()
     model_fintuned = create_hf_model(AutoModelForCausalLM,
                                      args.model_name_or_path_finetune,
-                                     tokenizer, None)
+                                     tokenizer, None).half()
 
-    model_baseline.to(device)
-    model_fintuned.to(device)
+    # model_baseline.to(device)
+    # model_fintuned.to(device)
 
     # One observation: if the prompt ends with a space " ", there is a high chance that
     # the original model (without finetuning) will stuck and produce no response.

@@ -2,6 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # DeepSpeed Team
+import copy
+
+import numpy as np
 import torch
 import torch.nn.functional as F
 import sys
@@ -12,8 +15,8 @@ from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
 
 sys.path.append(
     os.path.abspath(os.path.join(os.path.dirname(__file__), os.path.pardir)))
-
-from utils.utils import print_rank_0
+from utils.model.inference_model import InferenceModel
+from utils.utils import print_rank_0, to_device
 
 
 def print_all_ranks(tag, value, rank):
@@ -108,7 +111,7 @@ class DeepSpeedPPOTrainer():
         out_seq = []
         for i in range(batch_size):
             if valid_ans_len[
-                    i] <= 1:  # if the answer is shorter than 1 token, drop it
+                i] <= 1:  # if the answer is shorter than 1 token, drop it
                 continue
             else:
                 out_seq.append(seq[i:i + 1])

@@ -34,7 +34,17 @@ def get_train_ds_config(offload,
         "stage3_param_persistence_threshold": 1e4,
         "stage3_max_live_parameters": 3e7,
         "stage3_prefetch_bucket_size": 3e7,
-        "memory_efficient_linear": False
+        "memory_efficient_linear": False,
+
+        # "reduce_bucket_size": 10000000,
+        # "reduce_scatter": True,
+        #
+        # "zero_quantized_weights": True,
+        # "zero_hpz_partition_size": 8,
+        # "zero_quantized_gradients": True,
+        #
+        # "contiguous_gradients": True,
+        # "overlap_comm": True
     }
     if enable_mixed_precision_lora:
         zero_opt_dict["zero_quantized_nontrainable_weights"] = True
@@ -48,6 +58,12 @@ def get_train_ds_config(offload,
             "enabled": True,
             "loss_scale_window": 100
         },
+        # "bf16": {
+        #     "enabled": True
+        # },
+        # "tf32": {
+        #     "enabled": True
+        # },
         "gradient_clipping": 1.0,
         "prescale_gradients": False,
         "wall_clock_breakdown": False,
@@ -63,7 +79,13 @@ def get_train_ds_config(offload,
             "enabled": enable_tensorboard,
             "output_path": f"{tb_path}/ds_tensorboard_logs/",
             "job_name": f"{tb_name}_tensorboard"
-        }
+        },
+        # "comms_logger": {
+        #     "enabled": True,
+        #     "verbose": True,
+        #     "prof_all": True,
+        #     "debug": True
+        # }
     }
 
 
@@ -85,7 +107,19 @@ def get_eval_ds_config(offload, stage=0):
         "fp16": {
             "enabled": True
         },
+        # "bf16": {
+        #     "enabled": True
+        # },
+        # "tf32": {
+        #     "enabled": True
+        # },
         "gradient_clipping": 1.0,
         "prescale_gradients": False,
-        "wall_clock_breakdown": False
+        "wall_clock_breakdown": False,
+        # "comms_logger": {
+        #     "enabled": True,
+        #     "verbose": True,
+        #     "prof_all": True,
+        #     "debug": True
+        # }
     }
